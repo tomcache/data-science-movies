@@ -326,7 +326,7 @@ rmse_results %>% knitr::kable()
 
 # Discussion of results.
 
-# Sample some predictions:
+# We'll recalculate our final model:
 
 b_i_l <- edx %>% 
   group_by(movieId) %>%
@@ -343,7 +343,8 @@ predicted_ratings_l <-
   left_join(b_u_l, by = "userId") %>%
   mutate(pred = mu_hat + b_i_l + b_u_l)
 
-# Now lets take a look at some of our predictions:
+# Now lets take a look at some of our predictions. We'll create a sample set
+# of predictions using our validation set:
 
 set.seed(1, sample.kind="Rounding")
 
@@ -352,33 +353,26 @@ index <- sample(1:nrow(predicted_ratings_l), 50)
 movie_sample <- predicted_ratings_l[index, ] %>% mutate(error = rating - pred, mu = mu_hat)
 
 movie_plot <- gather(movie_sample, key = effect, value = value, b_i_l:mu, -pred)
-# We want to create a stacked bar chart showing the rating vs. predicted + error
 
-# Create break points and labels for axis ticks
-brks <- movie_sample$movieId[seq(1, length(movie_sample$movieId), 10)]
-lbls <- movie_sample$movieId[seq(1, length(movie_sample$movieId), 10)]
+# Now lot's take a look at the errors in our predictions
 
-# Plot
-ggplot(movie_sample, aes(userId, error)) + 
-  geom_area() + 
-  scale_x_continuous(breaks=waiver(), labels=waiver()) + 
-  theme(axis.text.x = element_text(angle=90)) + 
-  labs(title="Area Chart", 
-       subtitle = "Prediction Error for Movie Recommendations", 
-       y="Prediction error", 
-       caption="Source: movielens 10M")
+movie_sample %>% ggplot(aes(x = title, y = error)) + geom_bar( stat = "identity") + 
+  theme(axis.text.x = element_text(angle=65, vjust=0.6))    
 
-movie_sample %>% ggplot(aes(x = title, y = error)) + geom_bar( stat = "identity")
-
-movie_sample %>% ggplot() + geom_bar(aes(title, rating)) + geom_dotplot(aes(pred))
-
-# Then we want to create a stacked bar chart showing the components of the 
-# prediction - mu_hat, b_i, b_u and error.
-
-movie_plot %>% ggplot() + geom_bar(aes(y = rating, x = title, fill = effect), stat = "identity")
-
-# Finally:
+# We can summarize the predictions, and compare to the ratings distribution:
 
 summary(predicted_ratings_l)
+
+# Finally, we compare the histograms of the actual ratings to our model. It
+# shows us that while the RMSE's have been improved, the actual characteristics
+# between the two sets of data are quite different. 
+
+predicted_ratings_l %>% ggplot(aes(x = rating)) + 
+  geom_histogram(binwidth = .5)
+
+predicted_ratings_l %>% ggplot(aes(x = pred)) + 
+  geom_histogram(binwidth = .5)
+
+
                                      
                                      

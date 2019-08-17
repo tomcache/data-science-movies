@@ -1,4 +1,8 @@
+# List of files in project folder to be ignored:
+
+# Ignore dat files:
+ml-10M100K/*.*
+ml-10M100K/*.dat
+
+*.dat
 .Rproj.user
-.Rhistory
-.RData
-.Ruserdata
