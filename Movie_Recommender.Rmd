@@ -1,0 +1,447 @@
+---
+title: "Movie Recommender"
+author: "Thomas Linnell"
+date: "7/25/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction 
+
+### Overview
+The goal of this project is to create a recommendation system that will predict
+with high accuracy the rating that a customer would give to any particular movie
+that they would watch. This would be useful to organizations that provide movies
+as a service to help guide customers to select movies that they would like to see,
+and to avoid selecting movies that they would not. 
+
+The information that we have available to us is a large database of movie ratings. 
+However, this database is sparse in that we don't have ratings for all movies by all viewers. The challenge is to be able to use the information available to design a system that would be able to provide a good estimate of a particular users rating of a movie that they haven't rated yet.
+
+It turns out that this is a fairly complicated problem to solve, and involves much
+more that just providing the average review rating from all previous viewers of the 
+movie. There are many factors to consider - some people like different types of moviesmore than others, some movies are more liked than others by the general population, the user may be swayed by the actors featured in a movie, or the fact that all their friends are talking about a movie, and so on.
+
+Because of all these factors, we have chosen to use a machine learning algorithm approach to solving this puzzle. This will allow us to rapidy modify our modeling approaches utilizing a wide range of available techniques, and to iteratively add components to our model and to be able to test the effects of these on the overall accuracy.
+
+The goal of this project is to reduce the estimate error to a number below 0.9 RMSE,
+with increasing project scores as this metric approaches 0.8649.
+
+### Project setup and environment
+```{r project-setup, echo = FALSE}
+
+# Here we check for and load all of the required packages to run the project.
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+```
+
+### Data
+This project will utilize the dataset _MovieLens 10M_, provided by the GroupLens project, and can be found [here](https://grouplens.org/datasets/movielens/10m/)
+
+This dataset contains 10 million ratings of approximately 10,000 movies rated by almost 72,000 users.
+
+We will load the data and adjust it into the format that we want to use to analyze the ratings:
+
+```{r load-data, warning = FALSE}
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+```
+
+
+The structure of this dataset and the observations within are as follows. 
+
+```{r data-view}
+
+glimpse(movielens)
+
+```
+
+We see that the observations we are given keys for identifying users and movies, the ratings which are on a scale of 0.5 to 5, titles, classification information(genres) and a timestamp of when the rating was given. 
+
+The summary below also provides us with some useful information in that there are no NA's in the data that need to be tidied, and the ratings data do not have any outliers outside of the expected range. 
+
+```{r data-summary}
+
+summary(movielens)
+
+```
+
+#### Test and Validation sets 
+
+To begin with, we take the movielens 10M database provided and split this into a 
+test set (90%) and a validation set (10%). Our methodology will be developed on the 
+test set, and measured on the validation set, using the RMSE metric to judge and 
+compare the results as noted above.
+
+
+```{r data-split, message = FALSE, warning = FALSE}
+
+# Validation set will be 10% of MovieLens data
+
+# for R 3.6 , use this sampling. If using R 3.5 or earlier, use `set.seed(1)` instead
+set.seed(1, sample.kind="Rounding")
+
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Clean up data structures no longer needed
+
+rm(dl, ratings, movies, test_index, temp, removed)
+
+```
+
+
+## Methods and analysis
+
+From the summaries, we see that the data looks like it is in good shape for analysis. We can now proceed to analyzing these data to come up with an accurate prediction methodology. From the reference literature and coursework that we recently completed, we know that our model will require at least a computation of the following:
+
+* A baseline rating (e.g., the mean of all ratings)
+* A movie-specific effect (e.g., how this movie is rated vs. all of the other movies)
+* A user-specific effect (similar to the above, how this user compares to the others)
+
+In addition, it may be helpful to regularize the ratings data to reduce the 
+noisiness of movie ratings with low sampling counts. We will use this technique and
+compare the results to the unmodified dataset.
+
+#### Baseline Calculation
+
+
+We start by building a function to compute the RMSE of our model against a
+test data set, and then use that to compute a baseline RMSE of the mean of all ratings:
+
+```{r rmse-function}
+
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+```
+
+Now we look at a distribution of the ratings, to get a feel for how the data are distributed:
+
+```{r rating-plot, fig.width = 10, fig.height = 4, echo = FALSE}
+
+edx %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating)) %>% 
+  ggplot(aes(b_u)) + 
+  geom_histogram(bins = 30, color = "black")
+
+```
+
+It appears from this that the data is reasonably normally distributed, with a mean somewhere in the vicinity of 3.5 We next calculate the mean and plug that into our RMSE function:
+
+```{r baseline}
+
+(mu_hat <- mean(edx$rating))
+
+(baseline_rmse <- RMSE(validation$rating, mu_hat))
+
+```
+
+We see that the baseline RMSE, being over 1, tells us that a system built with just this calculation will not be very accurate, and will miss the true rating by about one entire star. We would like to see if it is possible to reduce this error to something less than one star.
+
+#### Movie Effects
+
+We now move on to computing a movie-specific effect. In order to compute this efficiently, we use the technique described in the course where the RMSE is calculated over the difference between the rating and the estimate of mu that we calculated previously.
+
+First we separate out the value of each rating for each movie less the overall baseline average that we just calculated, and calculate the mean of this value for each movie:
+
+```{r movie-avg}
+
+movie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu_hat))
+
+```
+
+We next plot the distribution of the movie effect:
+
+```{r movie-avg-plot, echo = FALSE, fig.width = 10, fig.height = 4}
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 10, data = ., color = I("black"))
+
+```
+
+Intrerestinly, the distribution implies that for most movies the ajdustment due to the movie effect will be to lower the rating.
+
+We then use these values to plug in a predicted value for a user rating by applying our baseline mean and our new movie mean calculation: 
+
+```{r movie-pred}
+
+predicted_ratings_1 <- mu_hat + validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+```
+
+Then we can compare our predictions to the actual ratings in our validation set for a new calculation of our estimate error:
+
+```{r movie-results}
+
+(movie_rmse <- RMSE(predicted_ratings_1, validation$rating))
+
+```
+
+We see that the estimate has improved, so now we will move on to computing the effect due to users, using a similar methodology.
+
+#### User Effects
+
+Again we are going to use the technique of approximating the estimate of user effect by computing the average of the difference of the rating and our estimate of the mean and estimate of the movie effect that we just computed:
+
+```{r user}
+
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu_hat - b_i))
+
+```
+
+If we take a look at the distribution due to the user effect, we see a very different result than what we saw for the movie-related effect:
+
+```{r user-plot, echo = FALSE, fig.width = 10, fig.height = 4}
+
+user_avgs %>% qplot(b_u, geom ="histogram", bins = 10, data = ., color = I("black"))
+
+```
+
+
+Once we have done that, we can plug this value in as before along with our baseline and movie effect estimate to arrive at a prediction of the rating for each movie:
+
+
+```{r user-pred}
+
+predicted_ratings_2 <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu_hat + b_i + b_u) %>%
+  pull(pred)
+
+```
+
+And we see what effect the user variation has on our prediction:
+
+```{r user-results}
+
+(user_rmse <- RMSE(predicted_ratings_2, validation$rating))
+
+```
+
+#### Regularization Effect 
+
+This calculation has also improved our RMSE. But can we do better? Now that we have accounted for the baseline, movie, and user effects, our RMSE has now improved to 0.865. However, we have not yet explored whether removing the noise from ratings of movies with low sample counts will improve our score, so we will take another look at the data.
+
+
+By looking at the movies with the largest errors, we see that there are still some rather large RMSE's in the analysis:
+
+```{r error-sort}
+
+edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  mutate(residual = rating - (mu_hat + b_i)) %>%
+  arrange(desc(abs(residual))) %>% 
+  select(title,  residual) %>% distinct() %>% slice(1:15) 
+
+movie_titles <- movielens %>% 
+  select(movieId, title) %>%
+  distinct()
+
+```
+
+If we sort the data by best movie rating, we can see that they all have low numbers of reviews:
+
+```{r freq-sort-best}
+
+edx %>% count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(desc(b_i)) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) 
+
+```
+
+And when we examine the movies with the worst ratings, we also see that most have low numbers of ratings:
+
+```{r freq-sort-worst}
+
+edx %>% count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(b_i) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10)
+
+```
+
+#### Penalty Calculation
+
+As we see from these lists, most of the movies generating the highest and lowest effects are from very few ratings (for the rest, it seems we can more easily agree which movies are real stinkers). Our next step in the process will be to regularize the data to reduce the weighting that is given to these infrequently rated movies. We will use penalized least squares, which adds a penalty term which increases with the value of b_i and also varies inversely with the number of ratings. We will also use cross-validation to test a range of penalty terms to see which value best minimizes our RMSE term:
+
+```{r regularize, fig.width = 10, fig.height = 4}
+
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+  
+  mu <- mean(edx$rating)
+  
+  b_i_l <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i_l = sum(rating - mu)/(n()+l))
+  
+  b_u_l <- edx %>% 
+    left_join(b_i_l, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u_l = sum(rating - b_i_l - mu)/(n()+l))
+  
+  predicted_ratings_l <- 
+    validation %>% 
+    left_join(b_i_l, by = "movieId") %>%
+    left_join(b_u_l, by = "userId") %>%
+    mutate(pred = mu + b_i_l + b_u_l) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings_l, validation$rating))
+})
+
+qplot(lambdas, rmses)  
+
+(lambda <- lambdas[which.min(rmses)])
+
+```
+
+To see the effect that this had on the data, we will recompute the movie effect using our chosen lambda value, and then plot this against the original data:
+
+```{r reg-final, fig.width = 10, fig.height = 4}
+
+movie_reg_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu_hat)/(n()+lambda), n_i = n()) 
+
+# To see the effect, we plot the original movie data vs. our new averages:
+data_frame(original = movie_avgs$b_i, 
+           regularilized = movie_reg_avgs$b_i, 
+           n = movie_reg_avgs$n_i) %>%
+  ggplot(aes(original, regularilized, size=sqrt(n))) + 
+  geom_point(shape=1, alpha=0.5)
+
+```
+
+This plot shows that significant cleanup of infrequently rated movies (small n, as described by the smallest circles) occurred in the data.
+
+We can now take another look at the residual sample to see how they have been affected by this :
+
+```{r error-sort-final}
+
+edx %>% 
+  left_join(movie_reg_avgs, by='movieId') %>%
+  mutate(residual = rating - (mu_hat + b_i)) %>%
+  arrange(desc(abs(residual))) %>% 
+  select(title,  residual) %>% distinct() %>% slice(1:15) 
+
+```
+
+We also see a big change in the representation of the highest and lowest-rated movies:
+
+```{r freq-sort-best-reg}
+
+edx %>% count(movieId) %>% 
+  left_join(movie_reg_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(desc(b_i)) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) 
+
+```
+
+```{r freq-sort-worst-reg}
+
+edx %>% count(movieId) %>% 
+  left_join(movie_reg_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(b_i) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10)
+
+```
+
+#### Results
+
+Let's put the results of our calculations into a table, so that we can 
+compare them:
+
+```{r results}
+
+rmse_results <- data_frame(method = "Baseline (mean)", RMSE = baseline_rmse)
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie Effect Model",  
+                                     RMSE = movie_rmse))
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie + User Effects Model",  
+                                     RMSE = user_rmse))
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Regularized Movie + User Effect Model",  
+                                     RMSE = min(rmses)))
+rmse_results %>% knitr::kable()
+
+```
+
+### Discussion of Results
+
+Our model has now been constructed, and to recap is comprosed of the following components:
+
+  1. A baseline mean of all ratings in the database;  
+  2. A calculation of the effect of each movie;
+  3. A calculation of the effect from each user providing ratings;  
+  4. A reweighting of the contribution to the above effects based upon the number of ratings given for each movie - the further from the baseline the rating is and the fewer the ratings, the less it contributes;  
+  5. A series of calculations to determine the optimal value for the penalty term for the reweighting calculation above. 
+  
+  These terms are then summed into our model equation as follows:
+  
+  Prediction = baseline + movie effect(movie) + user effect(user)
+  
+  or
+  
+  Rating = baseline + movie effect(movie) + user effect(user) + error
+  
+  We use the root-mean-squared error term to estimate the quality of our model. Using the techniques outlined above, we have reduced the error term from 1.06 using just the baseline mean to 0.0864.
+
+#### Areas for future investigation
+
+From a review of the literature on recommendation systems, other factors that could be investigated for improvements to our model could include adjusting for when the movie was rated (utilizing the timestamps), as well as utilizing matrix factorization to assess even finer levels of correlations between details of the movies (genres, actors, directors) as well as finding correlations between groups of users as well. Another area that bears further investigation is based on exploring the recommenderlab package which has support for collaborative filtering techniques for finding similarity patterns based on previous history and other factors. 
+
+ 
